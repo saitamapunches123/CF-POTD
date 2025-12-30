@@ -2,13 +2,16 @@
 // @name         cf potd
 // @namespace    http://tampermonkey.net/
 // @version      2025-12-26
-// @description  try to take over the world!
+// @description  This Script will add A POTD link on codeforces
 // @author       You
 // @match        *://codeforces.com/*
 // @icon         data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==
 // @grant        GM_log
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @license      MIT
+// @downloadURL https://update.greasyfork.org/scripts/560655/cf%20potd.user.js
+// @updateURL https://update.greasyfork.org/scripts/560655/cf%20potd.meta.js
 // ==/UserScript==
 
 
@@ -19,7 +22,7 @@
 
   1) To avoid API calls during contest all calls will be done only when clicking "POTD" thus making clicking POTD a bit slower but keeping refresh fast thus no lag in contest
   2) POTD are use specific that is for each user POTD will be different as POTD depend on the user curr_rating
-  3) POTD will be in range [curr_rating-neg_delta*100 , curr_rating+pos_delta*100] where curr_rating is rounded down. For example: if user is 1650 POTD can be of [1400,1500,1600,1700,1800]
+  3) POTD will be in range [curr_rating-NEG_DELTA*100 , curr_rating+POS_DELTA*100] where curr_rating is rounded down. For example: if user is 1650 POTD can be of [1400,1500,1600,1700,1800]
      Please change neg_delta and pos_delta constant variables if you want to change distribution
   3) POTD will always be an unsolved problem Unlike Leetcode where POTD can be an already solved problem. As they follow a global POTD model but this is using a user specic POTD
   4) on solving POTD and clicking "POTD" again you will be given a new unsolved "POTD" this is done as I want the "POTD" link to work as both a POTD and a random problem Generator
@@ -29,54 +32,48 @@
  TODO:
   1) ADD STREAKS
   2) For logged in users remove solved problems //DONE
+  3) Remove problems that are language specific (i.e doesnt support C++)
 */
-const neg_delta=2,pos_delta=2; //Change if you want a different distribution
-const codeforces_url = "https://codeforces.com";
-const all_problems_url = `${codeforces_url}/api/problemset.problems`;
-const users_url =`${codeforces_url}/api/user.info?handles=`
-const users_status_url =`${codeforces_url}/api/user.status?handle=`
-const default_user_name = "Enter";
-const default_rating = 800;
-const OK_verdict="OK";
-let all_problems = [];//initialized by calling get_all_problems on clicking POTD
+const DEBUG_MODE = "DEBUG";
+const PROD_MODE = "PROD";
+const MODE = PROD_MODE; // change if doing devlopment
+
+const NEG_DELTA=1,POS_DELTA=2; //Change if you want a different distribution
+const CODEFORCES_URL = "https://codeforces.com";
+const CODEFORCES_API_URL = `${CODEFORCES_URL}/api`;
+const PROBLEM = "problem";
+const PROBLEMSET = "problemset";
+const CONTEST = "contest";
+const ALL_PROBLEMS_ENDPOINT = `${PROBLEMSET}.problems`;
+const ALL_CONTEST_ENDPOINT = `${CONTEST}.list`;
+const USERS_ENDPOINT ="user.info?handles=";
+const USERS_STATUS_ENDPOINT ="user.status?handle=";
+const DEFAULT_USER_NAME = "Enter";
+const DEFAULT_RATING = 800;
+const OK_VERDICT="OK";
+const BANNED_CONTEST_WORDS = [
+    "Kotlin",
+    "Unknown Language",
+]; // To remove problem specific remove these contests
+const LANG_CHOSER = ".lang-chooser"; // this div containse USER_NAME and will add "POTD" here
+const POTD_TEXT = "POTD";
+const DEFAULT_GM_VALUE = -1;
+
+let ALL_PROBLEMS = []; // initialized in update_ALL_PROBLEMS
+let USER_NAME = DEFAULT_USER_NAME;
+let CONTEST_ID_TO_CONTEST_NAME = []; // initialized in update_CONTEST_ID_TO_CONTEST_NAME
+let DATE_STRING;
+
 (async () => {
-    function get_user_name_div(){
-        const header_div = document.querySelector("#header");
-        if (!header_div) return;
-
-        const lang_chooser_div = header_div.querySelector(".lang-chooser");
-        if (!lang_chooser_div) return;
-
-        const user_name_div = lang_chooser_div.querySelectorAll(":scope > div")[1];
-        return user_name_div;
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
-    function get_user_name() {
-        const user_name_div = get_user_name_div();
-        if (!user_name_div) return default_user_name;
-
-        const user_name_a = user_name_div.querySelectorAll("a")[1];
-        if (!user_name_a) return default_user_name;
-
-        return user_name_a.textContent.trim();
+    function should_recompute(value){
+        return (value === DEFAULT_GM_VALUE || MODE === DEBUG_MODE);// in DEBUG_MODE recompute everytime
     }
-    async function make_ui_change(streak) {
-        const user_name_div = get_user_name_div();
-
-        const potd_link = document.createElement("a");
-        potd_link.textContent = `POTD ${streak}`;
-        potd_link.href = "#";
-
-        potd_link.addEventListener("click", async (e) => {
-            all_problems=await get_all_problems();
-            e.preventDefault();
-            const url = await get_potd_url(get_user_name());
-            window.location.href = url;
-        });
-
-        user_name_div.prepend(document.createTextNode(" | "));
-        user_name_div.prepend(potd_link);
+    function GM_getValue2(key){
+        return GM_getValue(key, DEFAULT_GM_VALUE);
     }
-
     function get_date_ist() {
         const now = new Date();
         const istOffset = 5.5 * 60; // minutes
@@ -87,90 +84,96 @@ let all_problems = [];//initialized by calling get_all_problems on clicking POTD
         return `${year}-${month}-${day}`;
     }
 
+    async function make_codeforces_api_call(endpoint) {
+        const url=`${CODEFORCES_API_URL}/${endpoint}`;
+        console.log(`making API call to ${url}`);
+        try {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error("Network response was not ok");
+
+            const data = await response.json();
+            if (data.status !== "OK") throw new Error("API returned error");
+
+            return data.result;
+        } catch (err) {
+            console.error("API call failed:", endpoint, err);
+            return null;
+        }
+    }
+
+    async function get_all_problems(){
+        const result = await make_codeforces_api_call(ALL_PROBLEMS_ENDPOINT);
+        return result.problems;
+    }
+
+    async function get_all_contest(){
+        return await make_codeforces_api_call(ALL_CONTEST_ENDPOINT);
+    }
+
+    async function get_user_profile() {
+        const endpoint = `${USERS_ENDPOINT}${USER_NAME}`;
+        try {
+            const result = await make_codeforces_api_call(endpoint);
+            return result[0];
+        } catch (err) {
+            console.error(`Error fetching profile for ${USER_NAME}:`, err);
+            return null;
+        }
+    }
+
+    async function get_user_status(){
+        const endpoint = `${USERS_STATUS_ENDPOINT}${USER_NAME}`;
+        try {
+            return await make_codeforces_api_call(endpoint);
+        } catch (err) {
+            console.error(`Error fetching profile for ${USER_NAME}:`, err);
+            return null;
+        }
+    }
+
+    function get_user_name_div(){
+        const lang_chooser_div = document.querySelector(LANG_CHOSER);
+        if (!lang_chooser_div) return;
+
+        const user_name_div = lang_chooser_div.querySelectorAll(":scope > div")[1];
+        return user_name_div;
+    }
+
     function get_rating(rating) {
         if (!Number.isInteger(rating)) return 0;
-        rating=Math.max(rating,default_rating);
+        rating=Math.max(rating,DEFAULT_RATING);
         return Math.floor(rating / 100);
     }
 
     function get_problem_url(contest_id, problem_code) {
-        return `${codeforces_url}/contest/${contest_id}/problem/${problem_code}`;
+        return `${CODEFORCES_URL}/${CONTEST}/${contest_id}/${PROBLEM}/${problem_code}`;
     }
 
-
-    async function get_all_problems() {
-        const key = `${get_date_ist()}_all_problems`;
-        const value = GM_getValue(key, -1);
-        if (value != -1) {
-            console.log("using GM_getValue to get_all_problems");
-            return value;
-        }
-
-        try {
-            const response = await fetch(all_problems_url);
-            if (!response.ok) throw new Error("Network response was not ok");
-            const data = await response.json();
-            const problems = data.result.problems;
-            const ans = Array.from({ length: 50 }, () => []);
-            for (let problem of problems) {
-                const rating = get_rating(problem.rating);
-                const contest_id = problem.contestId;
-                const problem_code = problem.index;
-                const problem_url = get_problem_url(contest_id, problem_code);
-                ans[rating].push(problem_url);
-            }
-            GM_setValue(key, ans);
-            return ans;
-        } catch (err) {
-            console.error("Error fetching problems:", err);
-            return [];
-        }
-    }
-    async function get_user_profile(user_name) {
-
-        const url = `${users_url}${user_name}`;
-        try {
-            const response = await fetch(url);
-            if (!response.ok) throw new Error("Network response was not ok");
-
-            const data = await response.json();
-            if (data.status !== "OK") throw new Error("API returned an error");
-            return data.result[0];
-        } catch (err) {
-            console.error(`Error fetching profile for ${user_name}:`, err);
-            return null;
-        }
-    }
     function get_potd_problems_around_rating(rating) {
         const potd_problems = [];
 
-        for (let delta = -neg_delta; delta <= pos_delta; delta++) {
+        for (let delta = -NEG_DELTA; delta <= POS_DELTA; delta++) {
             const nrating = rating + delta;
-            if (all_problems[nrating] && all_problems[nrating].length > 0) {
-                potd_problems.push(...all_problems[nrating]);
+            if (ALL_PROBLEMS[nrating] && ALL_PROBLEMS[nrating].length > 0) {
+                potd_problems.push(...ALL_PROBLEMS[nrating]);
             }
         }
         return potd_problems;
     }
-    async function get_user_status(user_name){
-        const url = `${users_status_url}${user_name}`;
-        try {
-            const response = await fetch(url);
-            if (!response.ok) throw new Error("Network response was not ok");
 
-            const data = await response.json();
-            if (data.status !== "OK") throw new Error("API returned an error");
-            return data.result;
-        } catch (err) {
-            console.error(`Error fetching profile for ${user_name}:`, err);
-            return null;
-        }
+    function get_potd_GM_KEY(){
+        return `${DATE_STRING}_${POTD_TEXT}_${USER_NAME}`;
     }
-    async function get_solved_problems(user_name){
+
+    function get_all_problems_GM_KEY(){
+        return `${DATE_STRING}_${PROBLEMSET}`;
+    }
+
+    async function get_solved_problems(){
         const solved = new Set();
-        const user_statuses = await get_user_status(user_name);
+        const user_statuses = await get_user_status();
         for (const sub of user_statuses) {
-            if (sub.verdict === OK_verdict) {
+            if (sub.verdict === OK_VERDICT) {
                 const p = sub.problem;
                 const url=get_problem_url(p.contestId, p.index);
                 solved.add(url);
@@ -178,6 +181,107 @@ let all_problems = [];//initialized by calling get_all_problems on clicking POTD
         }
         return solved;
     }
+
+    async function get_potd_url() {
+        const key = get_potd_GM_KEY();
+        const value = GM_getValue2(key);
+        let flattened_problems;
+        if(USER_NAME == DEFAULT_USER_NAME){
+            if(should_recompute(value) === false){
+                return value;
+            }
+            flattened_problems = ALL_PROBLEMS.flat();
+        }else{
+            const solved_problems = await get_solved_problems();
+            if(should_recompute(value) === false && solved_problems.has(value) == false){
+                return value; //if the user has not solved the previous POTD use it
+            }
+            const user_profile = await get_user_profile();
+            const user_rating = get_rating(user_profile.rating);
+            flattened_problems = get_potd_problems_around_rating(user_rating);
+            flattened_problems = remove_solved_problems(solved_problems, flattened_problems);
+        }
+        const random_index = Math.floor(Math.random() * flattened_problems.length);
+        GM_setValue(key, flattened_problems[random_index]);
+        return flattened_problems[random_index];
+    }
+
+    function update_USER_NAME() {
+        const user_name_div = get_user_name_div();
+        if (!user_name_div) return DEFAULT_USER_NAME;
+
+        const user_name_a = user_name_div.querySelectorAll("a")[1];
+        if (!user_name_a) return DEFAULT_USER_NAME;
+
+        USER_NAME = user_name_a.textContent.trim();
+    }
+
+    async function update_CONTEST_ID_TO_CONTEST_NAME() { //No need to cache it as will only be called by update_ALL_PROBLEMS which caches its result
+        const contests = await get_all_contest();
+        let max_contest_id = 0;
+        for (const contest of contests) {
+            max_contest_id = Math.max(max_contest_id, contest.id);
+        }
+
+        CONTEST_ID_TO_CONTEST_NAME = Array(max_contest_id + 1).fill(null);
+
+        for (const contest of contests) {
+            CONTEST_ID_TO_CONTEST_NAME[contest.id] = contest.name;
+        }
+    }
+
+    function is_banned_problem(problem) {
+        const contest_id = problem.contestId;
+
+        const contest_name = CONTEST_ID_TO_CONTEST_NAME[contest_id];
+        if (!contest_name){
+            return false; // if null, assume allowed
+        }
+        for (const key of BANNED_CONTEST_WORDS) {
+            if (contest_name.includes(key)) {
+                console.log(`Banning ${contest_name} due to ${key}`);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    async function update_ALL_PROBLEMS() {
+        const key = get_all_problems_GM_KEY();
+        const value = GM_getValue2(key);
+        if (should_recompute(value) === false) {
+            console.log("using GM_getValue to update_ALL_PROBLEMS");
+            ALL_PROBLEMS = value;
+            return;
+        }
+        try {
+            const problems = await get_all_problems();
+            await update_CONTEST_ID_TO_CONTEST_NAME();
+
+            let max_rating = 0;
+            for (const problem of problems) {
+                max_rating = Math.max(max_rating, get_rating(problem.rating));
+            }
+
+            ALL_PROBLEMS = Array.from({length: max_rating+1}, () => [])
+
+            for (let problem of problems) {
+                if(is_banned_problem(problem)){
+                    continue;
+                }
+                const rating = get_rating(problem.rating);
+                const contest_id = problem.contestId;
+                const problem_code = problem.index;
+                const problem_url = get_problem_url(contest_id, problem_code);
+                ALL_PROBLEMS[rating].push(problem_url);
+            }
+            GM_setValue(key, ALL_PROBLEMS);
+        } catch (err) {
+            console.error("Error fetching problems:", err);
+            return [];
+        }
+    }
+
     function remove_solved_problems(solved_problems,problems){
         const unsolved_problems =[];
         for(const problem of problems){
@@ -189,29 +293,37 @@ let all_problems = [];//initialized by calling get_all_problems on clicking POTD
         }
         return unsolved_problems;
     }
-    async function get_potd_url(user_name) {
-        const key = `${get_date_ist()}_potd_${user_name}`;
-        const value = GM_getValue(key, -1);
-        var flattened_problems;
-        if(user_name==default_user_name){
-            if(value !=-1){
-                return value;
-            }
-            flattened_problems=all_problems.flat();
-        }else{
-            const solved_problems = await get_solved_problems(user_name);
-            if(value !=-1 && !solved_problems.has(value)){
-               return value; //if the user has not solved the previous POTD use it
-            }
-            const user_profile=await get_user_profile(user_name);
-            const user_rating=get_rating(user_profile.rating);
-            flattened_problems = get_potd_problems_around_rating(user_rating);
-            flattened_problems = remove_solved_problems(solved_problems, flattened_problems);
-        }
-        const random_index = Math.floor(Math.random() * flattened_problems.length);
-        GM_setValue(key, flattened_problems[random_index]);
-        return flattened_problems[random_index];
+
+    async function update_global_varaibles(){
+        DATE_STRING = get_date_ist();
+        update_USER_NAME();
+        await update_ALL_PROBLEMS();
     }
-    var streak=""//change and implement calculating streak logic
+
+    async function handle_potd_click(){
+        await update_global_varaibles();
+        const potd_url = await get_potd_url();
+        console.log("potd_url",potd_url);
+        if(MODE !== DEBUG_MODE){
+            window.location.href = potd_url;
+        }
+    }
+
+    async function make_ui_change(streak) {
+        const user_name_div = get_user_name_div();
+
+        const potd_link = document.createElement("a");
+        potd_link.textContent = `${POTD_TEXT} ${streak}`;
+        potd_link.href = "#";
+
+        potd_link.addEventListener("click", async (e) => {
+            e.preventDefault();
+            await handle_potd_click();
+        });
+        user_name_div.prepend(document.createTextNode(" | "));
+        user_name_div.prepend(potd_link);
+    }
+
+    let streak=""//change and implement calculating streak logic
     make_ui_change(streak);
 })();
