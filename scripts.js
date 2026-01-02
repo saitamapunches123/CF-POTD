@@ -69,7 +69,7 @@ const POTD_TEXT = "POTD";
 const TODO_TEXT = "TODO";
 const TODO_DAYS_THRESHOLD = 30; // Ideally wait for 30 days before solving TODO
 const ADD_TO_TODO_TEXT = "Add to TODO";
-const ADD_TO_TODO_EMOJI = "➕";
+const ADD_TO_TODO_EMOJI = "📝";
 const MARK_AS_DONE_TEXT = "Mark as done (remove from TODO)";
 const MARK_AS_DONE_EMOJI = "✅";
 const DEFAULT_GM_VALUE = -1;
@@ -504,16 +504,13 @@ let DATE_STRING;
         const problem_favorite_image = get_problem_favorite_image();
         if (!problem_favorite_image) return;
 
-        const doneCheckbox = document.createElement("input");
-        doneCheckbox.type = "checkbox";
-        doneCheckbox.title = MARK_AS_DONE_TEXT;
-        doneCheckbox.style.cursor = "pointer";
+        const toDoButton = create_todo_span(MARK_AS_DONE_EMOJI,MARK_AS_DONE_TEXT);
 
-        doneCheckbox.addEventListener(CLICK, () => {
+        toDoButton.addEventListener(CLICK, () => {
             remove_from_TODO_PROBLEMS(url);
             refresh(); // refresh page
         });
-        problem_favorite_image.parentElement.appendChild(doneCheckbox);
+        problem_favorite_image.parentElement.appendChild(toDoButton);
     }
 
     function add_mark_as_to_do_button(url) {
@@ -533,8 +530,8 @@ let DATE_STRING;
         if(is_problem_page(url) == false){
             return;
         }
-        const isInTodo = TODO_PROBLEMS.filter(p => p.url === url).length > 0;
-        if(isInTodo){
+        const todo_index = find_from_TODO_PROBLEMS(url);
+        if(todo_index!=-1){
             add_mark_as_done_button(url);
         }else{
             add_mark_as_to_do_button(url);
